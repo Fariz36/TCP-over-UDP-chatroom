@@ -1,5 +1,6 @@
 import socket
 import struct
+import zlib
 
 SYN = 0b0001
 ACK = 0b0010
@@ -9,29 +10,54 @@ class BetterUDPSocket:
     def __init__(self, udp_socket=None):
         self.sock = udp_socket or socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.addr = None
+        self.src_port = self.sock.getsockname()[1]
+        self.dest_port = 0 
         self.seq = 0
         self.ack = 0
         self.connected = False
 
+    def internet_checksum(data: bytes) -> int:
+        if len(data) % 2 == 1:
+            data += b'\x00'
+
+        checksum = 0
+        for i in range(0, len(data), 2):
+            word = (data[i] << 8) + data[i + 1]
+            checksum += word
+            checksum = (checksum & 0xFFFF) + (checksum >> 16)
+
+        return ~checksum & 0xFFFF
+
     def _make_packet(self, flags, seq, ack, data=b''):
-        return struct.pack('!BII', flags, seq, ack) + data
+        header = struct.pack('!BHHII', flags, self.src_port, self.dest_port, seq, ack)
+        checksum = self.internet_checksum(header + data)
+        return header + struct.pack('!H', checksum) + data 
 
     def _parse_packet(self, packet):
-        flags, seq, ack = struct.unpack('!BII', packet[:9])
-        data = packet[9:]
-        return flags, seq, ack, data
+        header = packet[:13]
+        checksum_recv = struct.unpack('!H', packet[13:15])[0]
+        data = packet[15:]
+
+        calc_checksum = self.internet_checksum(header + data)
+        if checksum_recv != calc_checksum:
+            raise ValueError("Checksum mismatch!")
+
+        flags, src_port, dest_port, seq, ack = struct.unpack('!BHHII', header)
+        return flags, src_port, dest_port, seq, ack, data
 
     def connect(self, ip_address, port):
         self.addr = (ip_address, port)
-        self.seq = 100  # random start
+        self.dest_port = port
+        self.seq = 100
         syn_packet = self._make_packet(SYN, self.seq, 0)
         self.sock.sendto(syn_packet, self.addr)
 
         while True:
             data, addr = self.sock.recvfrom(1024)
-            flags, seq, ack, _ = self._parse_packet(data)
+            flags, src_port, dest_port, seq, ack, _ = self._parse_packet(data)
             if flags & (SYN | ACK) and ack == self.seq + 1:
                 self.ack = seq + 1
+                self.dest_port = src_port  # update from peer
                 break
 
         self.seq += 1
@@ -117,8 +143,18 @@ class BetterUDPSocket:
         print("[RECEIVE] FIN : responding with FIN|ACK")
         fin_ack_pkt = self._make_packet(FIN | ACK, self.seq, self.ack)
         self.sock.sendto(fin_ack_pkt, self.addr)
-        self.connected = False
-        self.sock.close()
+
+        # Wait for final ACK
+        while True:
+            try:
+                data, addr = self.sock.recvfrom(1024)
+                flags, seq, ack, _ = self._parse_packet(data)
+                if flags & ACK:
+                    break
+            except socket.timeout:
+                print("[RECEIVE] Timeout waiting for final ACK")
+                break
 
         print("[HANDLE_CLOSE] 4-way handshake complete")
-
+        self.connected = False
+        self.sock.close()
