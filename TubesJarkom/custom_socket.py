@@ -6,14 +6,16 @@ from queue import Queue, Empty
 from typing import List, Optional, Dict, Tuple
 import random
 
-# Constants
 SYN = 0b0001
 ACK = 0b0010
 FIN = 0b0100
+TERM = 0b1000
 TIMEOUT = 1.0
 RETRIES = 5
 WINDOW_SIZE = 4
-MAX_PAYLOAD_SIZE = 64
+MAX_SEGMENT_SIZE = 128
+HEADER_SIZE = 15  # 1+2+2+4+4+2 bytes
+MAX_PAYLOAD_SIZE = MAX_SEGMENT_SIZE - HEADER_SIZE  # 113 bytes
 SEGMENT_TIMEOUT = 2.0
 
 class Segment:
@@ -44,15 +46,23 @@ class Segment:
     def pack(self) -> bytes:
         header = struct.pack('!BHHIIH', self.flags, self.src_port, self.dest_port, 
                            self.seq, self.ack, self.checksum)
-        return header + self.data
+        segment = header + self.data
+        
+        if len(segment) > MAX_SEGMENT_SIZE:
+            raise ValueError(f"Segment size {len(segment)} exceeds maximum {MAX_SEGMENT_SIZE}")
+        
+        return segment
     
     @classmethod
     def unpack(cls, data: bytes):
-        if len(data) < 15:
+        if len(data) < HEADER_SIZE:
             raise ValueError("Packet too short")
         
-        header = data[:15]
-        payload = data[15:]
+        if len(data) > MAX_SEGMENT_SIZE:
+            raise ValueError(f"Segment size {len(data)} exceeds maximum {MAX_SEGMENT_SIZE}")
+        
+        header = data[:HEADER_SIZE]
+        payload = data[HEADER_SIZE:]
         flags, src_port, dest_port, seq, ack, checksum = struct.unpack('!BHHIIH', header)
         
         segment = cls(flags, src_port, dest_port, seq, ack, payload)
@@ -60,10 +70,17 @@ class Segment:
             raise ValueError("Checksum mismatch")
         
         return segment
+    
+    def is_termination(self) -> bool:
+        return bool(self.flags & TERM)
+    
+    def set_termination(self):
+        self.flags |= TERM
+        self.checksum = self._calculate_checksum()
 
 class BetterUDPClientSocket:    
     def __init__(self, server_sock, client_addr, server_port, client_port, seq_num, ack_num):
-        self.server_sock = server_sock  # Reference to server's UDP socket
+        self.server_sock = server_sock
         self.addr = client_addr
         self.server_port = server_port
         self.client_port = client_port
@@ -92,7 +109,6 @@ class BetterUDPClientSocket:
         self.sending_complete = False
         self.send_lock = threading.Lock()
         
-        print(f"[CLIENT_SOCK {self.addr}] Created")
     
     def send(self, data: bytes):
         if not self.connected:
@@ -115,18 +131,16 @@ class BetterUDPClientSocket:
             return
         
         print(f"[CLIENT_SOCK {self.addr}] Closing connection")
-        # Send FIN
         fin_segment = Segment(FIN, self.server_port, self.client_port, self.seq_num, 0)
         
         for attempt in range(RETRIES):
             self.server_sock.sendto(fin_segment.pack(), self.addr)
             print(f"[CLIENT_SOCK {self.addr}] Sent FIN")
-            time.sleep(0.1)  # Give client time to respond
+            time.sleep(0.1)
         
         self.connected = False
     
     def _send_go_back_n_pipelined(self, data: bytes):
-        print(f"[CLIENT_SOCK {self.addr}] Sending {len(data)} bytes")
         
         segments = self._prepare_segments(data)
         if not segments:
@@ -179,6 +193,10 @@ class BetterUDPClientSocket:
         while offset < len(data):
             chunk = data[offset:offset + MAX_PAYLOAD_SIZE]
             segment = Segment(0, self.server_port, self.client_port, seq, 0, chunk)
+            
+            if offset + len(chunk) >= len(data):
+                segment.set_termination()
+            
             segments.append((seq, segment))
             self.send_buffer[seq] = segment
             offset += MAX_PAYLOAD_SIZE
@@ -213,7 +231,6 @@ class BetterUDPClientSocket:
                 segment_timestamps[seq] = current_time
     
     def handle_received_segment(self, segment):
-        """Handle incoming segment for this client"""
         print(f"[CLIENT_SOCK {self.addr}] Handling segment: flags={bin(segment.flags)}, seq={segment.seq}, ack={segment.ack}")
         
         # Handle ACK
@@ -241,7 +258,7 @@ class BetterUDPClientSocket:
                 self.message_segments[segment.seq] = segment.data
                 self.Rn += 1
                 
-                if len(segment.data) < MAX_PAYLOAD_SIZE:
+                if segment.is_termination():
                     complete_message = self._assemble_message()
                     if complete_message:
                         self.message_queue.put(complete_message)
@@ -251,7 +268,6 @@ class BetterUDPClientSocket:
     
     def _handle_fin_segment(self, segment):
         print(f"[CLIENT_SOCK {self.addr}] Received FIN")
-        # Send FIN-ACK
         fin_ack = Segment(FIN | ACK, self.server_port, self.client_port, 
                          self.seq_num, segment.seq + 1)
         self.server_sock.sendto(fin_ack.pack(), self.addr)
@@ -291,7 +307,7 @@ class BetterUDPSocket:
         self.server_mode = False
         self.running = False
         self.receiver_thread = None
-        self.connection_queue = Queue()  # Queue for new connections
+        self.connection_queue = Queue()
         
         # Original single-client variables (for client mode)
         self.Sb = 0
@@ -335,7 +351,7 @@ class BetterUDPSocket:
     def _receiver_loop(self):
         while self.running:
             try:
-                data, addr = self.sock.recvfrom(128)
+                data, addr = self.sock.recvfrom(MAX_SEGMENT_SIZE)  # Use optimized size
                 
                 try:
                     segment = Segment.unpack(data)
@@ -355,7 +371,6 @@ class BetterUDPSocket:
                 break
     
     def _handle_server_segment(self, segment, addr):
-        
         # Handle new connection (SYN)
         if segment.flags & SYN and not (segment.flags & ACK):
             self._handle_new_connection(segment, addr)
@@ -385,7 +400,7 @@ class BetterUDPSocket:
         start_time = time.time()
         while time.time() - start_time < TIMEOUT * 2:
             try:
-                data, client_addr = self.sock.recvfrom(128)
+                data, client_addr = self.sock.recvfrom(MAX_SEGMENT_SIZE)
                 if client_addr == addr:
                     try:
                         ack_segment = Segment.unpack(data)
@@ -435,7 +450,7 @@ class BetterUDPSocket:
                 start_time = time.time()
                 while time.time() - start_time < TIMEOUT:
                     try:
-                        data, addr = self.sock.recvfrom(128)
+                        data, addr = self.sock.recvfrom(MAX_SEGMENT_SIZE)
                         if addr == self.addr:
                             segment = Segment.unpack(data)
                             if (segment.flags & (SYN | ACK)) == (SYN | ACK) and segment.ack == self.seq_num + 1:
@@ -470,7 +485,6 @@ class BetterUDPSocket:
         except (OSError, socket.error):
             pass
     
-    # Include all the original methods for client mode functionality
     def send(self, data: bytes):
         if not self.connected:
             raise RuntimeError("Not connected")
@@ -574,6 +588,10 @@ class BetterUDPSocket:
         while offset < len(data):
             chunk = data[offset:offset + MAX_PAYLOAD_SIZE]
             segment = Segment(0, self.src_port, self.dest_port, seq, 0, chunk)
+            
+            if offset + len(chunk) >= len(data):
+                segment.set_termination()
+            
             segments.append((seq, segment))
             self.send_buffer[seq] = segment
             offset += MAX_PAYLOAD_SIZE
@@ -617,7 +635,7 @@ class BetterUDPSocket:
                 self.message_segments[segment.seq] = segment.data
                 self.Rn += 1
                 
-                if len(segment.data) < MAX_PAYLOAD_SIZE:
+                if segment.is_termination():
                     complete_message = self._assemble_message()
                     if complete_message:
                         self.message_queue.put(complete_message)
