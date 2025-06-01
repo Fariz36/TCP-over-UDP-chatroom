@@ -136,16 +136,16 @@
 
 <!-- Add your chatbot image here with desired size -->
 <div align="center">
-  Home Screen : <\br>
+  Home Screen : <br>
   ![image](https://github.com/user-attachments/assets/de72dce4-1cd8-444d-a6e1-61d13d2ad109)
 
-  Rename : <\br>
+  Rename : <br>
   ![image](https://github.com/user-attachments/assets/645ad8b8-1ec1-4cc0-a2c4-8d5ba1ef824c)
 
-  Disconnect : <\br>
+  Disconnect : <br>
   ![image](https://github.com/user-attachments/assets/7494be87-b653-4d3b-bb7a-230c69fb50a3)
 
-  Kill : <\br>
+  Kill : <br>
   ![image](https://github.com/user-attachments/assets/01c5d1c3-a801-4b49-8cc7-7941acf20cac)
 
 
