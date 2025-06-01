@@ -14,9 +14,10 @@ TIMEOUT = 1.0
 RETRIES = 5
 WINDOW_SIZE = 4
 MAX_SEGMENT_SIZE = 128
-HEADER_SIZE = 15  # 1+2+2+4+4+2 bytes
-MAX_PAYLOAD_SIZE = MAX_SEGMENT_SIZE - HEADER_SIZE  # 113 bytes
+HEADER_SIZE = 17  # 1+2+2+4+4+2+2 bytes
+MAX_PAYLOAD_SIZE = MAX_SEGMENT_SIZE - HEADER_SIZE  # 111 bytes
 SEGMENT_TIMEOUT = 2.0
+CRC16_POLYNOMIAL = 0xA001  # CRC-16-CCITT polynomial
 
 class Segment:
     def __init__(self, flags: int, src_port: int, dest_port: int, seq: int, ack: int, data: bytes = b''):
@@ -27,6 +28,7 @@ class Segment:
         self.ack = ack
         self.data = data[:MAX_PAYLOAD_SIZE]
         self.checksum = self._calculate_checksum()
+        self.crc16 = self._calculate_crc16()
     
     def _calculate_checksum(self) -> int:
         header = struct.pack('!BHHII', self.flags, self.src_port, self.dest_port, self.seq, self.ack)
@@ -43,9 +45,20 @@ class Segment:
         
         return ~checksum & 0xFFFF
     
+    def _calculate_crc16(self) -> int:
+        crc = 0xFFFF
+        for byte in self.data:
+            crc ^= byte
+            for _ in range(8):
+                if crc & 0x0001:
+                    crc = (crc >> 1) ^ CRC16_POLYNOMIAL
+                else:
+                    crc >>= 1
+        return crc & 0xFFFF
+    
     def pack(self) -> bytes:
-        header = struct.pack('!BHHIIH', self.flags, self.src_port, self.dest_port, 
-                           self.seq, self.ack, self.checksum)
+        header = struct.pack('!BHHIIHH', self.flags, self.src_port, self.dest_port, 
+                           self.seq, self.ack, self.checksum, self.crc16)
         segment = header + self.data
         
         if len(segment) > MAX_SEGMENT_SIZE:
@@ -63,11 +76,14 @@ class Segment:
         
         header = data[:HEADER_SIZE]
         payload = data[HEADER_SIZE:]
-        flags, src_port, dest_port, seq, ack, checksum = struct.unpack('!BHHIIH', header)
+        flags, src_port, dest_port, seq, ack, checksum, crc16 = struct.unpack('!BHHIIHH', header)
         
         segment = cls(flags, src_port, dest_port, seq, ack, payload)
         if segment.checksum != checksum:
             raise ValueError("Checksum mismatch")
+        
+        if segment.crc16 != crc16:
+            raise ValueError("CRC16 mismatch")
         
         return segment
     
