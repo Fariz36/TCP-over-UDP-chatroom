@@ -111,6 +111,44 @@ class Server:
                     
                     client['last_heartbeat'] = time.time()
                     
+                    if client_message == "__HEARTBEAT__":
+                        print(f"[SERVER] Received heartbeat from {client_name}")
+                        continue
+
+                    if client_message.startswith('!disconnect'):
+                        print(f"[SERVER] Client {client_name} requested to disconnect.")
+                        client['being_kicked'] = True
+                        self._cleanup_client(client)
+                        break
+                    if client_message.startswith('!rename'):
+                        new_name = client_message.split(' ', 1)[1].strip()
+                        if new_name:
+                            with self.clients_lock:
+                                for c in self.clients:
+                                    if c['name'] == new_name and c != client:
+                                        client_sock.send(f"Username '{new_name}' is already taken.".encode())
+                                        continue
+                                client['name'] = new_name
+                            print(f"[SERVER] Client {client_name} changed name to {new_name}.")
+                            self.broadcast_message("SERVER", f"{client_name} has changed their name to {new_name}.")
+                            for client_new in self.clients:
+                                if client_new['sock'] == client_sock:
+                                    client_new['name'] = new_name
+                            client_name = new_name
+                        else:
+                            client_sock.send("Invalid rename command. Usage: !rename <new_name>".encode())
+                        continue
+                    if client_message.startswith('!kill'):
+                        password = client_message.split(' ', 1)[1].strip() if ' ' in client_message else ''
+                        if password == 'wazeazure':
+                            print("[SERVER] Server shutdown requested via !kill command.")
+                            self.running = False
+                            self.broadcast_message("SERVER", "Server is shutting down.")
+                            client_sock.send("Server is shutting down.".encode())
+                            break
+                        else:
+                            continue
+
                     with self.clients_lock:
                         if client not in self.clients or client.get('being_kicked', False):
                             break
@@ -185,7 +223,7 @@ class Server:
             clients_to_remove = []
             
             with self.clients_lock:
-                clients_copy = self.clients.copy()  # Use copy to avoid modification during iteration
+                clients_copy = self.clients.copy() 
             
             for client in clients_copy:
                 if client.get('being_kicked', False):
@@ -200,7 +238,7 @@ class Server:
             for client in clients_to_remove:
                 self._cleanup_client(client)
             
-            time.sleep(5)
+            time.sleep(1)
 
 if __name__ == "__main__":
     server = Server('127.0.0.1', 9000)

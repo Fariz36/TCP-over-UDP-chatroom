@@ -1,6 +1,7 @@
 from custom_socket import BetterUDPSocket
 import threading
 import sys
+import time
 
 
 class Client:
@@ -79,10 +80,27 @@ class Client:
                 self.running = False
                 break
 
+    def heartbeat(self):
+        while self.running:
+            try:
+                time.sleep(1)  # Send heartbeat every 1 second
+                if self.running:
+                    # Send a simple heartbeat message that won't be broadcast
+                    heartbeat_message = "__HEARTBEAT__"
+                    self.socket.send(heartbeat_message.encode())
+            except Exception as e:
+                if self.running:
+                    print(f"[CLIENT] Error sending heartbeat: {e}")
+                    self.running = False
+                break
+
     def start_chat(self):
         try:
             listen_thread = threading.Thread(target=self.listen_for_messages, daemon=True)
             listen_thread.start()
+            
+            heartbeat_thread = threading.Thread(target=self.heartbeat, daemon=True)
+            heartbeat_thread.start()
             
             self.send_messages()
             
@@ -98,19 +116,6 @@ class Client:
             print("[CLIENT] Connection closed")
         except Exception as e:
             print(f"[CLIENT] Error closing connection: {e}")
-            
-    def heartbeat(self):
-        if not self.running:
-            return
-        try:
-            heartbeat_message = f"[{self.name}] is alive"
-            self.socket.send(heartbeat_message.encode())
-            print(f"[CLIENT] Heartbeat sent: {heartbeat_message}")
-        except Exception as e:
-            print(f"[CLIENT] Error sending heartbeat: {e}")
-            self.running = False
-        finally:
-            threading.Timer(1, self.heartbeat).start()
 
 if __name__ == "__main__":
     try:
@@ -118,4 +123,3 @@ if __name__ == "__main__":
         client.start_chat()
     except Exception as e:
         print(f"[CLIENT] Failed to start client: {e}")
-

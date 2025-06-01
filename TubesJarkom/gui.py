@@ -368,7 +368,19 @@ class KessokuChatRoom(QMainWindow):
         header_layout.addStretch()
 
         return header
-        
+    
+    def send_heartbeat(self):
+        while self.running:
+            try:
+                time.sleep(1)  # Send heartbeat every 1 second
+                if self.running and hasattr(self, 'socket'):
+                    # Send a special heartbeat message
+                    self.socket.send("__HEARTBEAT__".encode())
+            except Exception as e:
+                if self.running:
+                    print(f"[CLIENT] Heartbeat error: {e}")
+                break       
+
     def create_chat_area(self):
         chat_frame = QFrame()
         chat_layout = QVBoxLayout(chat_frame)
@@ -579,9 +591,21 @@ class KessokuChatRoom(QMainWindow):
     def send_message(self):
         message_text = self.message_input.text().strip()
         if message_text:
-            timestamp = datetime.now().strftime("%H:%M")
-            self.socket.send(message_text.encode())
-            self.add_message(self.username, message_text, timestamp, is_own=True)
+            # Handle rename command
+            if message_text.startswith('!rename '):
+                new_name = message_text.split(' ', 1)[1].strip()
+                if new_name:
+                    self.socket.send(message_text.encode())
+                    # Don't add to chat history yet, wait for server confirmation
+                else:
+                    self.add_message("SYSTEM", "Invalid rename command. Usage: !rename <new_name>", 
+                                datetime.now().strftime("%H:%M"), False)
+            else:
+                # Regular message
+                timestamp = datetime.now().strftime("%H:%M")
+                self.socket.send(message_text.encode())
+                self.add_message(self.username, message_text, timestamp, is_own=True)
+            
             self.message_input.clear()
 
     def add_message(self, username, message, timestamp, is_own=False):
@@ -647,6 +671,7 @@ class KessokuChatRoom(QMainWindow):
         pygame.mixer.quit()
         event.accept()
     
+    
     def listen_for_messages(self):
         RETRIES = 5
         retry = 0
@@ -655,15 +680,45 @@ class KessokuChatRoom(QMainWindow):
                 response = self.socket.receive()
                 if response:
                     message = response.decode().strip()
-                    sender, msg = message.split(maxsplit=1)
-                    if message:
-                        print(f"\n[{sender[:-1]}] {msg}")
-                        print(f"[{self.username}] ", end="", flush=True)  # Restore input prompt
-                        self.message_received.emit(sender[:-1], msg, datetime.now().strftime("%H:%M"), False)
+                    
+                    # Handle system messages and rename notifications
+                    if message.startswith("SERVER:"):
+                        # Extract the server message
+                        server_msg = message[7:].strip()  # Remove "SERVER: " prefix
+                        
+                        # Check if this is a rename notification for this user
+                        if " has changed their name to " in server_msg:
+                            parts = server_msg.split(" has changed their name to ")
+                            if len(parts) == 2:
+                                old_name = parts[0].strip()
+                                new_name = parts[1].strip().rstrip('.')
+                                
+                                # If this is our own rename
+                                if old_name == self.username:
+                                    self.handle_self_rename(new_name)
+                        
+                        # Display the server message
+                        self.message_received.emit("SERVER", server_msg, datetime.now().strftime("%H:%M"), False)
+                        
+                    else:
+                        # Handle regular user messages
+                        if ":" in message:
+                            sender, msg = message.split(":", 1)
+                            sender = sender.strip()
+                            msg = msg.strip()
+                            
+                            print(f"\n[{sender}] {msg}")
+                            print(f"[{self.username}] ", end="", flush=True)
+                            self.message_received.emit(sender, msg, datetime.now().strftime("%H:%M"), False)
+                        else:
+                            # Handle messages without proper format
+                            print(f"\n[SYSTEM] {message}")
+                            self.message_received.emit("SYSTEM", message, datetime.now().strftime("%H:%M"), False)
                 else:
-                    if self.running:  # Only print if we're still supposed to be running
+                    if self.running:
                         print("\n[CLIENT] Connection lost or server closed")
                         print("\n[CLIENT] Retrying")
+                        retry += 1
                         if retry >= RETRIES:
                             self.running = False
                             break
@@ -672,6 +727,21 @@ class KessokuChatRoom(QMainWindow):
                     print(f"\n[CLIENT] Error receiving message: {e}")
                     self.running = False
                 break
+
+    def handle_self_rename(self, new_username):
+        """Handle renaming the user in the chat history."""
+        old_username = self.username
+        self.username = new_username
+        
+        # Update all messages in the chat history
+        for i, (username, message, timestamp, is_own) in enumerate(self.history_messages):
+            if username == old_username and is_own:
+                self.history_messages[i] = (new_username, message, timestamp, is_own)
+        
+        print(f"[CLIENT] Renamed from {old_username} to {new_username}")
+        
+        # Refresh the chat to show updated names
+        # self.refresh_chat_history()
 
     def start_socket(self, username):
         self.username = username
@@ -692,6 +762,9 @@ class KessokuChatRoom(QMainWindow):
 
         self.listenThread = threading.Thread(target=self.listen_for_messages, daemon=True)
         self.listenThread.start()
+
+        self.heartbeatThread = threading.Thread(target=self.send_heartbeat, daemon=True)
+        self.heartbeatThread.start()
 
     def refresh_chat_history(self):
         """Clear all current messages and reload only from history_messages"""
