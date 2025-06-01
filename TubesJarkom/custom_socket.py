@@ -10,13 +10,13 @@ SYN = 0b0001
 ACK = 0b0010
 FIN = 0b0100
 TERM = 0b1000
-TIMEOUT = 1.0
-RETRIES = 5
+TIMEOUT = 0.5
+RETRIES = 20
 WINDOW_SIZE = 4
 MAX_SEGMENT_SIZE = 128
 HEADER_SIZE = 17  # 1+2+2+4+4+2+2 bytes
 MAX_PAYLOAD_SIZE = MAX_SEGMENT_SIZE - HEADER_SIZE  # 111 bytes
-SEGMENT_TIMEOUT = 2.0
+SEGMENT_TIMEOUT = 0.5
 CRC16_POLYNOMIAL = 0xA001  # CRC-16-CCITT polynomial
 
 class Segment:
@@ -371,7 +371,7 @@ class BetterUDPSocket:
                 
                 try:
                     segment = Segment.unpack(data)
-                    
+                    #print(f"[RECV] Received segment from {addr}: flags={bin(segment.flags)}, seq={segment.seq}, ack={segment.ack}")
                     if self.server_mode:
                         self._handle_server_segment(segment, addr)
                     else:
@@ -409,35 +409,38 @@ class BetterUDPSocket:
         
         synack_segment = Segment(SYN | ACK, self.src_port, segment.src_port, 
                                server_seq, ack_num)
-        self.sock.sendto(synack_segment.pack(), addr)
-        print(f"[SERVER] Sent SYN-ACK to {addr}")
         
-        # Wait for final ACK
-        start_time = time.time()
-        while time.time() - start_time < TIMEOUT * 2:
-            try:
-                data, client_addr = self.sock.recvfrom(MAX_SEGMENT_SIZE)
-                if client_addr == addr:
-                    try:
-                        ack_segment = Segment.unpack(data)
-                        if (ack_segment.flags & ACK) and ack_segment.ack == server_seq + 1:
-                            # Connection established
-                            client_sock = BetterUDPClientSocket(
-                                self.sock, addr, self.src_port, segment.src_port,
-                                server_seq + 1, ack_segment.seq
-                            )
-                            
-                            with self.clients_lock:
-                                self.clients[addr] = client_sock
-                            
-                            self.connection_queue.put(client_sock)
-                            print(f"[SERVER] Client {addr} connected successfully")
-                            return
-                    except ValueError:
-                        continue
-            except socket.timeout:
-                continue
+        for attempt in range(RETRIES):
+            self.sock.sendto(synack_segment.pack(), addr)
+            print(f"[SERVER] Sent SYN-ACK to {addr}")
+            
+            # Wait for final ACK
+            start_time = time.time()
+            while time.time() - start_time < TIMEOUT * 2:
+                try:
+                    data, client_addr = self.sock.recvfrom(MAX_SEGMENT_SIZE)
+                    if client_addr == addr:
+                        try:
+                            ack_segment = Segment.unpack(data)
+                            if (ack_segment.flags & ACK) and ack_segment.ack == server_seq + 1:
+                                # Connection established
+                                client_sock = BetterUDPClientSocket(
+                                    self.sock, addr, self.src_port, segment.src_port,
+                                    server_seq + 1, ack_segment.seq
+                                )
+                                
+                                with self.clients_lock:
+                                    self.clients[addr] = client_sock
+                                
+                                self.connection_queue.put(client_sock)
+                                print(f"[SERVER] Client {addr} connected successfully")
+                                return
+                        except ValueError:
+                            continue
+                except socket.timeout:
+                    continue
         
+        raise TimeoutError("Failed to establish connection with client")
         print(f"[SERVER] Failed to complete handshake with {addr}")
     
     def _handle_client_segment(self, segment, addr):
@@ -583,12 +586,13 @@ class BetterUDPSocket:
             
             if self._check_and_slide_window():
                 continue
-            
+
             current_time = time.time()
             for seq in range(self.Sb, min(self.Sb + self.N, self.next_to_send)):
                 if seq in segment_timestamps:
                     if current_time - segment_timestamps[seq] > SEGMENT_TIMEOUT:
                         self._retransmit_window(segment_timestamps)
+                        print(f"[CLIENT_SOCK {self.addr}] Retransmitting segment {seq}") 
                         break
             
             time.sleep(0.001)
@@ -640,6 +644,7 @@ class BetterUDPSocket:
                 segment_timestamps[seq] = current_time
     
     def _handle_ack_segment(self, segment):
+        print(f"[CLIENT_SOCK {self.addr}] Handling ACK segment: ack={segment.ack}")
         with self.ack_lock:
             if segment.ack > self.latest_ack:
                 self.latest_ack = segment.ack
