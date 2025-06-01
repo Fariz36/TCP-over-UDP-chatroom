@@ -8,6 +8,12 @@ from PyQt5.QtWidgets import *
 from PyQt5.QtCore import *
 from PyQt5.QtGui import *
 import pygame
+from client import Client
+from custom_socket import BetterUDPSocket
+
+# import os
+# os.environ["SDL_AUDIODRIVER"] = "dummy"
+
 
 class MusicPlayer(QObject):
     def __init__(self):
@@ -124,14 +130,21 @@ class ChatMessage(QWidget):
         self.setLayout(layout)
 
 class KessokuChatRoom(QMainWindow):
-    def __init__(self):
+    message_received = pyqtSignal(str, str, str, bool)
+    
+    def __init__(self, host, port):
         super().__init__()
-        self.username = "Guest"
+        self.username = ""
         self.music_player = MusicPlayer()
         self.messages = []
         self.setup_ui()
         self.setup_style()
-        
+        self.socket = BetterUDPSocket()
+        self.host = host
+        self.port = port
+        self.running = True
+        self.message_received.connect(self.add_message)
+
     def setup_ui(self):
         self.setWindowTitle("ChatTCP")
         self.setGeometry(100, 100, 900, 700)
@@ -368,11 +381,10 @@ class KessokuChatRoom(QMainWindow):
         message_text = self.message_input.text().strip()
         if message_text:
             timestamp = datetime.now().strftime("%H:%M")
+            self.socket.send(message_text.encode())
             self.add_message(self.username, message_text, timestamp, is_own=True)
             self.message_input.clear()
-            
-            self.simulate_response(message_text)
-            
+
     def add_message(self, username, message, timestamp, is_own=False):
         message_widget = ChatMessage(username, message, timestamp, is_own)
         
@@ -432,23 +444,67 @@ class KessokuChatRoom(QMainWindow):
         self.music_player.stop_song()
         pygame.mixer.quit()
         event.accept()
+    
+    def listen_for_messages(self):
+        RETRIES = 5
+        retry = 0
+        while self.running:
+            try:
+                response = self.socket.receive()
+                if response:
+                    message = response.decode().strip()
+                    sender, msg = message.split(maxsplit=1)
+                    if message:
+                        print(f"\n[{sender[:-1]}] {msg}")
+                        print(f"[{self.username}] ", end="", flush=True)  # Restore input prompt
+                        self.message_received.emit(sender[:-1], msg, datetime.now().strftime("%H:%M"), False)
+                else:
+                    if self.running:  # Only print if we're still supposed to be running
+                        print("\n[CLIENT] Connection lost or server closed")
+                        print("\n[CLIENT] Retrying")
+                        if retry >= RETRIES:
+                            self.running = False
+                            break
+            except Exception as e:
+                if self.running:
+                    print(f"\n[CLIENT] Error receiving message: {e}")
+                    self.running = False
+                break
+
+    def start_socket(self, username):
+        self.username = username
+
+        try:
+            self.socket.connect(self.host, self.port)
+            print(f"[CLIENT] Connected to server at {self.host}:{self.port}")
+                
+            self.socket.send(username.encode())
+            
+            welcome_response = self.socket.receive()
+            if welcome_response:
+                self.add_message("SYSTEM", welcome_response.decode(), datetime.now().strftime("%H:%M"))
+            
+        except Exception as e:
+            print(f"[CLIENT] Failed to connect: {e}")
+            raise
+
+        self.listenThread = threading.Thread(target=self.listen_for_messages, daemon=True)
+        self.listenThread.start()
 
 def main():
+    username = str(input("input username: "))
     app = QApplication(sys.argv)
 
-    
     # Custom font if available
     font_id = QFontDatabase.addApplicationFont("arial.ttf")
     if font_id != -1:
         font_family = QFontDatabase.applicationFontFamilies(font_id)[0]
         app.setFont(QFont(font_family, 10))
     
-    window = KessokuChatRoom()
+    window = KessokuChatRoom("127.0.0.1", 9000)
     window.show()
+    window.start_socket(username)
     
-    # Add welcome message
-    welcome_msg = ("niggas, niggas, niggas, niggas, nigger, nigger")
-    window.add_message("System", welcome_msg, datetime.now().strftime("%H:%M"))
     
     sys.exit(app.exec_())
 
