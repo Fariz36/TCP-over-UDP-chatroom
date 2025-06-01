@@ -572,6 +572,7 @@ class BetterUDPSocket:
         segment_timestamps = {}
         
         while self.Sb < base_seq + total_segments:
+            upper_bound = min(self.Sb + self.N, base_seq + total_segments)
             while (self.next_to_send < self.Sb + self.N and 
                    self.next_to_send < base_seq + total_segments):
                 
@@ -588,7 +589,7 @@ class BetterUDPSocket:
                 continue
 
             current_time = time.time()
-            for seq in range(self.Sb, min(self.Sb + self.N, self.next_to_send)):
+            for seq in range(self.Sb, upper_bound):
                 if seq in segment_timestamps:
                     if current_time - segment_timestamps[seq] > SEGMENT_TIMEOUT:
                         self._retransmit_window(segment_timestamps)
