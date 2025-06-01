@@ -10,15 +10,14 @@ SYN = 0b0001
 ACK = 0b0010
 FIN = 0b0100
 TERM = 0b1000
-
 TIMEOUT = 0.5
-RETRIES = 15
-WINDOW_SIZE = 3
+RETRIES = 20
+WINDOW_SIZE = 4
 MAX_SEGMENT_SIZE = 128
-HEADER_SIZE = 17
-MAX_PAYLOAD_SIZE = MAX_SEGMENT_SIZE - HEADER_SIZE
+HEADER_SIZE = 17  # 1+2+2+4+4+2+2 bytes
+MAX_PAYLOAD_SIZE = MAX_SEGMENT_SIZE - HEADER_SIZE  # 111 bytes
 SEGMENT_TIMEOUT = 0.5
-CRC16_POLYNOMIAL = 0xA001
+CRC16_POLYNOMIAL = 0xA001  # CRC-16-CCITT polynomial
 
 class Segment:
     def __init__(self, flags: int, src_port: int, dest_port: int, seq: int, ack: int, data: bytes = b''):
@@ -105,54 +104,40 @@ class BetterUDPClientSocket:
         self.ack_num = ack_num
         self.connected = True
         
-        # PERBAIKAN: Go-Back-N variables dengan locking yang lebih baik
+        # Go-Back-N variables
         self.Sb = seq_num
         self.Sm = self.Sb + WINDOW_SIZE - 1
         self.next_to_send = self.Sb
         self.Rn = ack_num
         
-        # Buffers dengan proper synchronization
+        # Buffers and synchronization
         self.send_buffer = {}
         self.ack_received = threading.Event()
         self.latest_ack = self.Sb
-        self.ack_lock = threading.RLock()  # Gunakan RLock untuk nested locking
-        self.send_lock = threading.RLock()
+        self.ack_lock = threading.Lock()
         
         # Message handling
         self.message_queue = Queue()
         self.message_segments = {}
-        self.receive_lock = threading.RLock()
+        self.receive_lock = threading.Lock()
         
         # Control flags
         self.sending_complete = False
-        self.last_activity = time.time()  # PERBAIKAN: Track activity
+        self.send_lock = threading.Lock()
         
+    
     def send(self, data: bytes):
         if not self.connected:
             raise RuntimeError("Not connected")
-        return self._send_go_back_n_optimized(data)
+        return self._send_go_back_n_pipelined(data)
     
     def receive(self) -> Optional[bytes]:
         if not self.connected:
             raise RuntimeError("Not connected")
         
         try:
-            # PERBAIKAN: Timeout lebih pendek untuk GUI responsiveness
-            message = self.message_queue.get(timeout=2.0)
-            self.last_activity = time.time()
+            message = self.message_queue.get(timeout=10.0)
             print(f"[CLIENT_SOCK {self.addr}] Received message ({len(message)} bytes)")
-            return message
-        except Empty:
-            return None
-    
-    def receive_with_timeout(self, timeout=2.0) -> Optional[bytes]:
-        """PERBAIKAN: Method khusus untuk GUI dengan timeout custom"""
-        if not self.connected:
-            raise RuntimeError("Not connected")
-        
-        try:
-            message = self.message_queue.get(timeout=timeout)
-            self.last_activity = time.time()
             return message
         except Empty:
             return None
@@ -164,15 +149,15 @@ class BetterUDPClientSocket:
         print(f"[CLIENT_SOCK {self.addr}] Closing connection")
         fin_segment = Segment(FIN, self.server_port, self.client_port, self.seq_num, 0)
         
-        for attempt in range(3):  # Kurangi retry untuk close
+        for attempt in range(RETRIES):
             self.server_sock.sendto(fin_segment.pack(), self.addr)
             print(f"[CLIENT_SOCK {self.addr}] Sent FIN")
             time.sleep(0.1)
         
         self.connected = False
     
-    def _send_go_back_n_optimized(self, data: bytes):
-        """PERBAIKAN: Flow control yang lebih stabil dan cepat"""
+    def _send_go_back_n_pipelined(self, data: bytes):
+        
         segments = self._prepare_segments(data)
         if not segments:
             return False
@@ -187,74 +172,34 @@ class BetterUDPClientSocket:
             self.sending_complete = False
         
         segment_timestamps = {}
-        retry_count = 0
-        max_retries = 5
         
-        while self.Sb < base_seq + total_segments and retry_count < max_retries:
-            # Send window segments
-            self._send_window_segments(base_seq, total_segments, segment_timestamps)
-            
-            # PERBAIKAN: Wait dengan timeout yang reasonable
-            if self._wait_for_ack_batch(timeout=SEGMENT_TIMEOUT):
-                retry_count = 0  # Reset retry jika ada progress
-            else:
-                # PERBAIKAN: Selective retransmission
-                self._selective_retransmit(segment_timestamps)
-                retry_count += 1
-            
-            # PERBAIKAN: CPU breathing room
-            time.sleep(0.01)
-        
-        print(f"[CLIENT_SOCK {self.addr}] Send complete (retries: {retry_count})")
-        return retry_count < max_retries
-    
-    def _send_window_segments(self, base_seq, total_segments, segment_timestamps):
-        """Send all segments in current window"""
-        current_time = time.time()
-        
-        while (self.next_to_send < self.Sb + WINDOW_SIZE and 
-               self.next_to_send < base_seq + total_segments):
-            
-            seq = self.next_to_send
-            if seq in self.send_buffer:
-                segment = self.send_buffer[seq]
-                self.server_sock.sendto(segment.pack(), self.addr)
-                segment_timestamps[seq] = current_time
+        while self.Sb < base_seq + total_segments:
+            while (self.next_to_send < self.Sb + WINDOW_SIZE and 
+                   self.next_to_send < base_seq + total_segments):
                 
-                with self.send_lock:
-                    self.next_to_send += 1
-    
-    def _wait_for_ack_batch(self, timeout):
-        """Wait for ACKs with better timeout handling"""
-        start_time = time.time()
-        initial_ack = self.latest_ack
-        
-        while time.time() - start_time < timeout:
-            if self._check_and_slide_window():
-                return True  # Progress made
-            time.sleep(0.01)  # Short sleep
-        
-        return self.latest_ack > initial_ack
-    
-    def _selective_retransmit(self, segment_timestamps):
-        """PERBAIKAN: Retransmit hanya segment yang benar-benar timeout"""
-        current_time = time.time()
-        
-        with self.send_lock:
-            # Reset next_to_send to beginning of window
-            self.next_to_send = self.Sb
-        
-        # Retransmit hanya segment dalam window yang timeout
-        for seq in range(self.Sb, min(self.Sb + WINDOW_SIZE, self.next_to_send + WINDOW_SIZE)):
-            if seq in self.send_buffer:
-                # Check if this segment needs retransmission
-                if (seq not in segment_timestamps or 
-                    current_time - segment_timestamps.get(seq, 0) > SEGMENT_TIMEOUT):
-                    
+                seq = self.next_to_send
+                if seq in self.send_buffer:
                     segment = self.send_buffer[seq]
                     self.server_sock.sendto(segment.pack(), self.addr)
-                    segment_timestamps[seq] = current_time
-                    print(f"[CLIENT_SOCK {self.addr}] Retransmitted segment {seq}")
+                    segment_timestamps[seq] = time.time()
+                    
+                    with self.send_lock:
+                        self.next_to_send += 1
+            
+            self._check_and_slide_window()
+            
+            # Check for timeouts
+            current_time = time.time()
+            for seq in range(self.Sb, min(self.Sb + WINDOW_SIZE, self.next_to_send)):
+                if seq in segment_timestamps:
+                    if current_time - segment_timestamps[seq] > SEGMENT_TIMEOUT:
+                        self._retransmit_window(segment_timestamps)
+                        break
+            
+            time.sleep(0.001)
+        
+        print(f"[CLIENT_SOCK {self.addr}] Send complete")
+        return True
     
     def _prepare_segments(self, data: bytes):
         segments = []
@@ -280,7 +225,6 @@ class BetterUDPClientSocket:
             if self.latest_ack > self.Sb:
                 old_sb = self.Sb
                 
-                # Clean up acknowledged segments
                 for s in range(self.Sb, self.latest_ack):
                     if s in self.send_buffer:
                         del self.send_buffer[s]
@@ -289,8 +233,21 @@ class BetterUDPClientSocket:
                 return True
         return False
     
+    def _retransmit_window(self, segment_timestamps):
+        print(f"[CLIENT_SOCK {self.addr}] Retransmitting window from {self.Sb}")
+        
+        with self.send_lock:
+            self.next_to_send = self.Sb
+        
+        current_time = time.time()
+        for seq in range(self.Sb, min(self.Sb + WINDOW_SIZE, self.next_to_send + WINDOW_SIZE)):
+            if seq in self.send_buffer:
+                segment = self.send_buffer[seq]
+                self.server_sock.sendto(segment.pack(), self.addr)
+                segment_timestamps[seq] = current_time
+    
     def handle_received_segment(self, segment):
-        self.last_activity = time.time()
+        print(f"[CLIENT_SOCK {self.addr}] Handling segment: flags={bin(segment.flags)}, seq={segment.seq}, ack={segment.ack}")
         
         # Handle ACK
         if (segment.flags & ACK) and not (segment.flags & (SYN | FIN)) and segment.ack > 0:
@@ -360,7 +317,7 @@ class BetterUDPSocket:
         self.ack_num = 0
         self.connected = False
         
-        # Server mode variables
+        # For server mode - multiple clients
         self.clients: Dict[Tuple[str, int], BetterUDPClientSocket] = {}
         self.clients_lock = threading.RLock()
         self.server_mode = False
@@ -368,48 +325,27 @@ class BetterUDPSocket:
         self.receiver_thread = None
         self.connection_queue = Queue()
         
-        # Client mode variables
+        # Original single-client variables (for client mode)
         self.Sb = 0
+        self.Sm = 0
         self.N = WINDOW_SIZE
         self.next_to_send = 0
         self.Rn = 0
         self.send_buffer = {}
         self.ack_received = threading.Event()
         self.latest_ack = 0
-        self.ack_lock = threading.RLock()
+        self.ack_lock = threading.Lock()
         self.message_queue = Queue()
         self.message_segments = {}
-        self.receive_lock = threading.RLock()
+        self.receive_lock = threading.Lock()
         self.sending_complete = False
-        self.send_lock = threading.RLock()
-    
-    # PERBAIKAN: Method untuk GUI dengan timeout pendek
-    def receive_with_timeout(self, timeout=2.0) -> Optional[bytes]:
-        """Receive dengan timeout yang bisa dikustomisasi untuk GUI"""
-        if not self.connected:
-            raise RuntimeError("Not connected")
-        
-        try:
-            message = self.message_queue.get(timeout=timeout)
-            return message
-        except Empty:
-            return None
-    
-    def send_heartbeat(self):
-        """Method khusus untuk heartbeat yang lebih ringan"""
-        if self.connected:
-            try:
-                # Kirim heartbeat dengan payload minimal
-                heartbeat_segment = Segment(0, self.src_port, self.dest_port, 
-                                          self.seq_num, 0, b"__HB__")
-                self.sock.sendto(heartbeat_segment.pack(), self.addr)
-            except Exception as e:
-                print(f"[CLIENT] Heartbeat send error: {e}")
+        self.send_lock = threading.Lock()
     
     def listen(self):
         self.server_mode = True
         self._update_src_port()
         self._start_receiver_thread()
+        
         print(f"[SERVER] Listening on port {self.src_port}")
     
     def accept(self):
@@ -422,17 +358,112 @@ class BetterUDPSocket:
         except Empty:
             raise TimeoutError("No incoming connections")
     
+    def _start_receiver_thread(self):
+        if not self.running:
+            self.running = True
+            self.receiver_thread = threading.Thread(target=self._receiver_loop, daemon=True)
+            self.receiver_thread.start()
+    
+    def _receiver_loop(self):
+        while self.running:
+            try:
+                data, addr = self.sock.recvfrom(MAX_SEGMENT_SIZE)  # Use optimized size
+                
+                try:
+                    segment = Segment.unpack(data)
+                    #print(f"[RECV] Received segment from {addr}: flags={bin(segment.flags)}, seq={segment.seq}, ack={segment.ack}")
+                    if self.server_mode:
+                        self._handle_server_segment(segment, addr)
+                    else:
+                        self._handle_client_segment(segment, addr)
+                        
+                except ValueError as e:
+                    print(f"[RECV] Bad packet from {addr}: {e}")
+                    continue
+                    
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+    
+    def _handle_server_segment(self, segment, addr):
+        # Handle new connection (SYN)
+        if segment.flags & SYN and not (segment.flags & ACK):
+            self._handle_new_connection(segment, addr)
+            return
+        
+        # Handle existing client
+        with self.clients_lock:
+            if addr in self.clients:
+                client_sock = self.clients[addr]
+                client_sock.handle_received_segment(segment)
+            else:
+                print(f"[SERVER] Received segment from unknown client {addr}")
+    
+    def _handle_new_connection(self, segment, addr):
+        print(f"[SERVER] New connection from {addr}")
+        
+        # Send SYN-ACK
+        server_seq = random.randint(1000, 9999)
+        ack_num = segment.seq + 1
+        
+        synack_segment = Segment(SYN | ACK, self.src_port, segment.src_port, 
+                               server_seq, ack_num)
+        
+        for attempt in range(RETRIES):
+            self.sock.sendto(synack_segment.pack(), addr)
+            print(f"[SERVER] Sent SYN-ACK to {addr}")
+            
+            # Wait for final ACK
+            start_time = time.time()
+            while time.time() - start_time < TIMEOUT * 2:
+                try:
+                    data, client_addr = self.sock.recvfrom(MAX_SEGMENT_SIZE)
+                    if client_addr == addr:
+                        try:
+                            ack_segment = Segment.unpack(data)
+                            if (ack_segment.flags & ACK) and ack_segment.ack == server_seq + 1:
+                                # Connection established
+                                client_sock = BetterUDPClientSocket(
+                                    self.sock, addr, self.src_port, segment.src_port,
+                                    server_seq + 1, ack_segment.seq
+                                )
+                                
+                                with self.clients_lock:
+                                    self.clients[addr] = client_sock
+                                
+                                self.connection_queue.put(client_sock)
+                                print(f"[SERVER] Client {addr} connected successfully")
+                                return
+                        except ValueError:
+                            continue
+                except socket.timeout:
+                    continue
+        
+        raise TimeoutError("Failed to establish connection with client")
+        print(f"[SERVER] Failed to complete handshake with {addr}")
+    
+    def _handle_client_segment(self, segment, addr):
+        if addr == self.addr:
+            print(f"[CLIENT] Received segment: flags={bin(segment.flags)}, seq={segment.seq}, ack={segment.ack}")
+            
+            if (segment.flags & ACK) and not (segment.flags & (SYN | FIN)) and segment.ack > 0:
+                self._handle_ack_segment(segment)
+            
+            if len(segment.data) > 0 and not (segment.flags & (SYN | FIN)):
+                self._handle_data_segment(segment)
+    
     def connect(self, ip_address: str, port: int):
         self.addr = (ip_address, port)
         self.dest_port = port
         self._update_src_port()
         
-        # PERBAIKAN: 3-way handshake dengan retry logic yang lebih baik
+        # 3-way handshake
         syn_segment = Segment(SYN, self.src_port, self.dest_port, self.seq_num, 0)
         
         for attempt in range(RETRIES):
             self.sock.sendto(syn_segment.pack(), self.addr)
-            print(f"[CLIENT] Sent SYN (seq={self.seq_num}) - attempt {attempt + 1}")
+            print(f"[CLIENT] Sent SYN (seq={self.seq_num})")
             
             try:
                 start_time = time.time()
@@ -453,6 +484,7 @@ class BetterUDPSocket:
                                 # Initialize Go-Back-N
                                 self.connected = True
                                 self.Sb = self.seq_num
+                                self.Sm = self.Sb + self.N - 1
                                 self.next_to_send = self.Sb
                                 self.Rn = self.ack_num
                                 
@@ -462,156 +494,8 @@ class BetterUDPSocket:
                         continue
             except socket.timeout:
                 continue
-            
-            # PERBAIKAN: Exponential backoff
-            time.sleep(min(0.5 * (2 ** attempt), 2.0))
         
-        raise TimeoutError("Connection failed after multiple attempts")
-    
-    def _start_receiver_thread(self):
-        if not self.running:
-            self.running = True
-            self.receiver_thread = threading.Thread(target=self._receiver_loop, daemon=True)
-            self.receiver_thread.start()
-    
-    def _receiver_loop(self):
-        consecutive_errors = 0
-        max_errors = 10
-        
-        while self.running and consecutive_errors < max_errors:
-            try:
-                data, addr = self.sock.recvfrom(MAX_SEGMENT_SIZE)
-                consecutive_errors = 0
-                
-                try:
-                    segment = Segment.unpack(data)
-                    if self.server_mode:
-                        self._handle_server_segment(segment, addr)
-                    else:
-                        self._handle_client_segment(segment, addr)
-                        
-                except ValueError as e:
-                    print(f"[RECV] Bad packet from {addr}: {e}")
-                    continue
-                    
-            except socket.timeout:
-                continue
-            except OSError as e:
-                consecutive_errors += 1
-                if self.running:
-                    print(f"[RECV] Socket error: {e}")
-                    time.sleep(0.1)
-        
-        if consecutive_errors >= max_errors:
-            print("[RECV] Too many consecutive errors, stopping receiver")
-            self.running = False
-    
-    def send(self, data: bytes):
-        if not self.connected:
-            raise RuntimeError("Not connected")
-        return self._send_go_back_n_optimized(data)
-    
-    def _send_go_back_n_optimized(self, data: bytes):
-        segments = self._prepare_segments(data)
-        if not segments:
-            return False
-        
-        base_seq = self.next_to_send
-        total_segments = len(segments)
-        
-        with self.send_lock:
-            self.Sb = base_seq
-            self.next_to_send = base_seq
-            self.latest_ack = base_seq
-            self.sending_complete = False
-        
-        segment_timestamps = {}
-        retry_count = 0
-        max_retries = 5
-        
-        while self.Sb < base_seq + total_segments and retry_count < max_retries:
-            while (self.next_to_send < self.Sb + self.N and 
-                   self.next_to_send < base_seq + total_segments):
-                
-                seq = self.next_to_send
-                if seq in self.send_buffer:
-                    segment = self.send_buffer[seq]
-                    self.sock.sendto(segment.pack(), self.addr)
-                    segment_timestamps[seq] = time.time()
-                    
-                    with self.send_lock:
-                        self.next_to_send += 1
-            
-            if self._check_and_slide_window():
-                retry_count = 0
-            else:
-                current_time = time.time()
-                timeout_detected = False
-                
-                for seq in range(self.Sb, min(self.Sb + self.N, self.next_to_send)):
-                    if seq in segment_timestamps:
-                        if current_time - segment_timestamps[seq] > SEGMENT_TIMEOUT:
-                            self._retransmit_window(segment_timestamps)
-                            retry_count += 1
-                            timeout_detected = True
-                            break
-                
-                if not timeout_detected:
-                    time.sleep(0.01)
-        
-        self.sending_complete = True
-        return retry_count < max_retries
-    
-    def _prepare_segments(self, data: bytes):
-        segments = []
-        offset = 0
-        seq = self.next_to_send
-        
-        while offset < len(data):
-            chunk = data[offset:offset + MAX_PAYLOAD_SIZE]
-            segment = Segment(0, self.src_port, self.dest_port, seq, 0, chunk)
-            
-            if offset + len(chunk) >= len(data):
-                segment.set_termination()
-            
-            segments.append((seq, segment))
-            self.send_buffer[seq] = segment
-            offset += MAX_PAYLOAD_SIZE
-            seq += 1
-        
-        return segments
-    
-    def _check_and_slide_window(self):
-        with self.ack_lock:
-            if self.latest_ack > self.Sb:
-                for s in range(self.Sb, self.latest_ack):
-                    if s in self.send_buffer:
-                        del self.send_buffer[s]
-                
-                self.Sb = self.latest_ack
-                return True
-        return False
-    
-    def _retransmit_window(self, segment_timestamps):
-        with self.send_lock:
-            self.next_to_send = self.Sb
-        
-        current_time = time.time()
-        for seq in range(self.Sb, min(self.Sb + self.N, self.next_to_send + self.N)):
-            if seq in self.send_buffer:
-                segment = self.send_buffer[seq]
-                self.sock.sendto(segment.pack(), self.addr)
-                segment_timestamps[seq] = current_time
-    
-    def receive(self) -> Optional[bytes]:
-        if not self.connected:
-            raise RuntimeError("Not connected")
-        
-        try:
-            message = self.message_queue.get(timeout=10.0)
-            return message
-        except Empty:
-            return None
+        raise TimeoutError("Connection failed")
     
     def _update_src_port(self):
         try:
@@ -619,6 +503,21 @@ class BetterUDPSocket:
                 self.src_port = self.sock.getsockname()[1]
         except (OSError, socket.error):
             pass
+    
+    def send(self, data: bytes):
+        if not self.connected:
+            raise RuntimeError("Not connected")
+        return self._send_go_back_n_pipelined(data)
+    
+    def receive(self) -> Optional[bytes]:
+        if not self.connected:
+            raise RuntimeError("Not connected")
+        
+        try:
+            message = self.message_queue.get(timeout=30.0)
+            return message
+        except Empty:
+            return None
     
     def close(self):
         if self.server_mode:
@@ -646,7 +545,7 @@ class BetterUDPSocket:
         self.running = False
         fin_segment = Segment(FIN, self.src_port, self.dest_port, self.seq_num, 0)
         
-        for attempt in range(3):
+        for attempt in range(RETRIES):
             self.sock.sendto(fin_segment.pack(), self.addr)
             time.sleep(0.1)
         
@@ -656,66 +555,97 @@ class BetterUDPSocket:
         
         self.sock.close()
     
-    def _handle_server_segment(self, segment, addr):
-        if segment.flags & SYN and not (segment.flags & ACK):
-            self._handle_new_connection(segment, addr)
-            return
+    def _send_go_back_n_pipelined(self, data: bytes):
+        segments = self._prepare_segments(data)
+        if not segments:
+            return False
         
-        with self.clients_lock:
-            if addr in self.clients:
-                client_sock = self.clients[addr]
-                client_sock.handle_received_segment(segment)
-            else:
-                print(f"[SERVER] Received segment from unknown client {addr}")
-    
-    def _handle_new_connection(self, segment, addr):
-        print(f"[SERVER] New connection from {addr}")
+        base_seq = self.next_to_send
+        total_segments = len(segments)
         
-        server_seq = random.randint(1000, 9999)
-        ack_num = segment.seq + 1
+        with self.send_lock:
+            self.Sb = base_seq
+            self.next_to_send = base_seq
+            self.latest_ack = base_seq
+            self.sending_complete = False
         
-        synack_segment = Segment(SYN | ACK, self.src_port, segment.src_port, 
-                               server_seq, ack_num)
+        segment_timestamps = {}
         
-        for attempt in range(RETRIES):
-            self.sock.sendto(synack_segment.pack(), addr)
-            print(f"[SERVER] Sent SYN-ACK to {addr}")
+        while self.Sb < base_seq + total_segments:
+            upper_bound = min(self.Sb + self.N, base_seq + total_segments)
+            while (self.next_to_send < self.Sb + self.N and 
+                   self.next_to_send < base_seq + total_segments):
+                
+                seq = self.next_to_send
+                if seq in self.send_buffer:
+                    segment = self.send_buffer[seq]
+                    self.sock.sendto(segment.pack(), self.addr)
+                    segment_timestamps[seq] = time.time()
+                    
+                    with self.send_lock:
+                        self.next_to_send += 1
             
-            start_time = time.time()
-            while time.time() - start_time < TIMEOUT * 2:
-                try:
-                    data, client_addr = self.sock.recvfrom(MAX_SEGMENT_SIZE)
-                    if client_addr == addr:
-                        try:
-                            ack_segment = Segment.unpack(data)
-                            if (ack_segment.flags & ACK) and ack_segment.ack == server_seq + 1:
-                                client_sock = BetterUDPClientSocket(
-                                    self.sock, addr, self.src_port, segment.src_port,
-                                    server_seq + 1, ack_segment.seq
-                                )
-                                
-                                with self.clients_lock:
-                                    self.clients[addr] = client_sock
-                                
-                                self.connection_queue.put(client_sock)
-                                print(f"[SERVER] Client {addr} connected successfully")
-                                return
-                        except ValueError:
-                            continue
-                except socket.timeout:
-                    continue
-        
-        print(f"[SERVER] Failed to complete handshake with {addr}")
-    
-    def _handle_client_segment(self, segment, addr):
-        if addr == self.addr:
-            if (segment.flags & ACK) and not (segment.flags & (SYN | FIN)) and segment.ack > 0:
-                self._handle_ack_segment(segment)
+            if self._check_and_slide_window():
+                continue
+
+            current_time = time.time()
+            for seq in range(self.Sb, upper_bound):
+                if seq in segment_timestamps:
+                    if current_time - segment_timestamps[seq] > SEGMENT_TIMEOUT:
+                        self._retransmit_window(segment_timestamps)
+                        print(f"[CLIENT_SOCK {self.addr}] Retransmitting segment {seq}") 
+                        break
             
-            if len(segment.data) > 0 and not (segment.flags & (SYN | FIN)):
-                self._handle_data_segment(segment)
+            time.sleep(0.001)
+        
+        self.sending_complete = True
+        return True
+    
+    def _prepare_segments(self, data: bytes):
+        segments = []
+        offset = 0
+        seq = self.next_to_send
+        
+        while offset < len(data):
+            chunk = data[offset:offset + MAX_PAYLOAD_SIZE]
+            segment = Segment(0, self.src_port, self.dest_port, seq, 0, chunk)
+            
+            if offset + len(chunk) >= len(data):
+                segment.set_termination()
+            
+            segments.append((seq, segment))
+            self.send_buffer[seq] = segment
+            offset += MAX_PAYLOAD_SIZE
+            seq += 1
+        
+        return segments
+    
+    def _check_and_slide_window(self):
+        with self.ack_lock:
+            if self.latest_ack > self.Sb:
+                old_sb = self.Sb
+                
+                for s in range(self.Sb, self.latest_ack):
+                    if s in self.send_buffer:
+                        del self.send_buffer[s]
+                
+                self.Sb = self.latest_ack
+                return True
+        return False
+    
+    def _retransmit_window(self, segment_timestamps):
+        with self.send_lock:
+            self.next_to_send = self.Sb
+        
+        current_time = time.time()
+        for seq in range(self.Sb, min(self.Sb + self.N, self.next_to_send + self.N)):
+            if seq in self.send_buffer:
+                segment = self.send_buffer[seq]
+                self.sock.sendto(segment.pack(), self.addr)
+                segment_timestamps[seq] = current_time
     
     def _handle_ack_segment(self, segment):
+        print(f"[CLIENT_SOCK {self.addr}] Handling ACK segment: ack={segment.ack}")
         with self.ack_lock:
             if segment.ack > self.latest_ack:
                 self.latest_ack = segment.ack
