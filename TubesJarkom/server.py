@@ -111,6 +111,10 @@ class Server:
                     
                     client['last_heartbeat'] = time.time()
                     
+                    if client_message == "__HEARTBEAT__":
+                        print(f"[SERVER] Received heartbeat from {client_name}")
+                        continue
+
                     with self.clients_lock:
                         if client not in self.clients or client.get('being_kicked', False):
                             break
@@ -185,7 +189,7 @@ class Server:
             clients_to_remove = []
             
             with self.clients_lock:
-                clients_copy = self.clients.copy()  # Use copy to avoid modification during iteration
+                clients_copy = self.clients.copy() 
             
             for client in clients_copy:
                 if client.get('being_kicked', False):

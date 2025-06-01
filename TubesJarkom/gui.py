@@ -367,6 +367,18 @@ class KessokuChatRoom(QMainWindow):
         header_layout.addStretch()
 
         return header
+    
+    def send_heartbeat(self):
+        while self.running:
+            try:
+                time.sleep(1)  # Send heartbeat every 1 second
+                if self.running and hasattr(self, 'socket'):
+                    # Send a special heartbeat message
+                    self.socket.send("__HEARTBEAT__".encode())
+            except Exception as e:
+                if self.running:
+                    print(f"[CLIENT] Heartbeat error: {e}")
+                break
         
     def create_chat_area(self):
         chat_frame = QFrame()
@@ -691,6 +703,9 @@ class KessokuChatRoom(QMainWindow):
 
         self.listenThread = threading.Thread(target=self.listen_for_messages, daemon=True)
         self.listenThread.start()
+
+        self.heartbeatThread = threading.Thread(target=self.send_heartbeat, daemon=True)
+        self.heartbeatThread.start()
 
     def refresh_chat_history(self):
         """Clear all current messages and reload only from history_messages"""
