@@ -168,17 +168,19 @@ class Server:
             print(f"[SERVER] Error in handle_client for {client_name}: {e}")
         
         finally:
-            if not client.get('being_kicked', False):
+            if client.get('being_kicked', False):
                 self._cleanup_client(client)
     
     def _cleanup_client(self, client):
         client_name = client['name']
-        
-        client['being_kicked'] = True
-        
         print(f"[SERVER] Client {client_name} disconnected.")
         
-        self.broadcast_message("SERVER", f"{client_name} has left the chat.")
+        broadcast_thread = Thread(
+            target=self.broadcast_message, 
+            args=("SERVER", f"{client_name} has left the chat."),
+            daemon=True
+        )
+        broadcast_thread.start()
         
         with self.clients_lock:
             try:
@@ -197,48 +199,43 @@ class Server:
             clients_copy = self.clients.copy()
         
         for client in clients_copy:
-            client_sock = client['sock']
-            client_name = client['name']
-            
             if client.get('being_kicked', False):
                 continue
             
-            if client_name != sender_name or sender_name == "SERVER":
-                try:
-                    formatted_message = f"{sender_name}: {message}"
-                    client_sock.send(formatted_message.encode())
-                except Exception as e:
-                    print(f"[SERVER] Failed to send message to {client_name}: {e}")
-                    try:
-                        with self.clients_lock:
-                            if client in self.clients:
-                                self.clients.remove(client)
-                        client_sock.close()
-                    except:
-                        pass
-    
+            if client['name'] == sender_name and sender_name != "SERVER":
+                continue
+            
+            try:
+                formatted_message = f"{sender_name}: {message}"
+                client['sock'].send(formatted_message.encode())
+            except Exception as e:
+                # Only log the error, don't remove the client here
+                print(f"[SERVER] Failed to send to {client['name']}: {e}")
     def _monitor_heartbeat(self):
         while self.running:
-            current_time = time.time()
-            clients_to_remove = []
-            
-            with self.clients_lock:
-                clients_copy = self.clients.copy() 
-            
-            for client in clients_copy:
-                if client.get('being_kicked', False):
-                    continue
-                    
-                last_heartbeat = client.get('last_heartbeat', current_time)
-                if current_time - last_heartbeat > 30.0:
-                    print(f"[SERVER] {client['name']} timed out (no heartbeat for {current_time - last_heartbeat:.1f}s)")
-                    self.broadcast_message("SERVER", f"{client['name']} menghilang dari Tubes, {client['name']} tercallout di X!")
-                    clients_to_remove.append(client)
-            
-            for client in clients_to_remove:
-                self._cleanup_client(client)
-            
-            time.sleep(1)
+            try:
+                current_time = time.time()
+                clients_to_remove = []
+                
+                with self.clients_lock:
+                    clients_copy = self.clients.copy() 
+                
+                for client in clients_copy:
+                    if client.get('being_kicked', False):
+                        continue
+                        
+                    last_heartbeat = client.get('last_heartbeat', current_time)
+                    if current_time - last_heartbeat > 30.0:
+                        print(f"[SERVER] {client['name']} timed out (no heartbeat for {current_time - last_heartbeat:.1f}s)")
+                        self.broadcast_message("SERVER", f"{client['name']} menghilang dari Tubes, {client['name']} tercallout di X!")
+                        clients_to_remove.append(client)
+                
+                for client in clients_to_remove:
+                    self._cleanup_client(client)
+                
+                time.sleep(1)
+            except Exception as e:
+                print(f"[SERVER] Error in heartbeat monitor: {e}")
 
 if __name__ == "__main__":
     server = Server('127.0.0.1', 9000)
