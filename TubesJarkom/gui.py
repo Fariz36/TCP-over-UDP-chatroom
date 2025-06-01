@@ -12,10 +12,10 @@ from client import Client
 from custom_socket import BetterUDPSocket
 import socket # truly only for dns lookup 
 
-import os
-os.environ["SDL_AUDIODRIVER"] = "dummy"
 # import os
 # os.environ["SDL_AUDIODRIVER"] = "dummy"
+# # import os
+# # os.environ["SDL_AUDIODRIVER"] = "dummy"
 
 
 class MusicPlayer(QObject):
@@ -763,6 +763,7 @@ class KessokuChatRoom(QMainWindow):
         self.listenThread = threading.Thread(target=self.listen_for_messages, daemon=True)
         self.listenThread.start()
 
+        
         self.heartbeatThread = threading.Thread(target=self.send_heartbeat, daemon=True)
         self.heartbeatThread.start()
 
