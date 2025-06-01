@@ -10,6 +10,7 @@ from PyQt5.QtGui import *
 import pygame
 from client import Client
 from custom_socket import BetterUDPSocket
+import socket # truly only for dns lookup 
 
 import os
 os.environ["SDL_AUDIODRIVER"] = "dummy"
@@ -747,10 +748,13 @@ def main():
         # Get the connection details
         username = connection_dialog.username
         ip_address = connection_dialog.ip_address
+        ip_address = socket.gethostbyname(ip_address)
         port = connection_dialog.port
         
         print(f"[CLIENT] Connecting to {ip_address}:{port} as {username}")
         
+        
+
         # Create and show main window
         window = KessokuChatRoom(ip_address, port)
         window.show()
