@@ -1,6 +1,7 @@
 from custom_socket import BetterUDPSocket
 import threading
-import time
+import sys
+
 
 class Client:
     def __init__(self, HOST, PORT):
@@ -38,8 +39,9 @@ class Client:
                 response = self.socket.receive()
                 if response:
                     message = response.decode().strip()
+                    sender, msg = message.split(maxsplit=1)
                     if message:
-                        print(f"\n{message}")
+                        print(f"\n[{sender[:-1]}] {msg}")
                         print(f"[{self.name}] ", end="", flush=True)  # Restore input prompt
                 else:
                     if self.running:  # Only print if we're still supposed to be running
@@ -103,6 +105,9 @@ if __name__ == "__main__":
         client.start_chat()
     except Exception as e:
         print(f"[CLIENT] Failed to start client: {e}")
+
+
+
 
 # def main():
 #     print("[CLIENT] Starting client...")

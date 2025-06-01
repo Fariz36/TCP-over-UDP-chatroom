@@ -495,7 +495,7 @@ class BetterUDPSocket:
             raise RuntimeError("Not connected")
         
         try:
-            message = self.message_queue.get(timeout=10.0)
+            message = self.message_queue.get(timeout=30.0)
             return message
         except Empty:
             return None
