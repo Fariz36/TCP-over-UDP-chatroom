@@ -11,6 +11,10 @@ import pygame
 from client import Client
 from custom_socket import BetterUDPSocket
 
+# import os
+# os.environ["SDL_AUDIODRIVER"] = "dummy"
+
+
 class MusicPlayer(QObject):
     def __init__(self):
         super().__init__()
@@ -500,7 +504,8 @@ def main():
     window = KessokuChatRoom("127.0.0.1", 9000)
     window.show()
     window.start_socket(username)
-
+    
+    
     sys.exit(app.exec_())
 
 if __name__ == "__main__":
