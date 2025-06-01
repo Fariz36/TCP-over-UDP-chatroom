@@ -3,7 +3,9 @@
 > IF2230 - 2025 - edberteddysongunawan
 <br/>
 
-![alt text](image.png)
+<div align="center">
+  <img src="image.png" alt="Project Image" width="80%">
+</div>
 
 <br/>
  <div align="center" id="contributor">
@@ -132,7 +134,10 @@
 
 ### **Chatbot**
 
-masukin dah fotonya
+<!-- Add your chatbot image here with desired size -->
+<div align="center">
+  <img src="chatbot_image.png" alt="Chatbot Feature" width="500">
+</div>
 
 <div align="center">
  Computer Network • © 2025 • edberteddysongunawan
