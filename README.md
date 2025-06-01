@@ -3,6 +3,8 @@
 > IF2230 - 2025 - edberteddysongunawan
 <br/>
 
+![alt text](image.png)
+
 <br/>
  <div align="center" id="contributor">
    <strong>
