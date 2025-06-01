@@ -11,6 +11,10 @@ import pygame
 from client import Client
 from custom_socket import BetterUDPSocket
 
+import os
+os.environ["SDL_AUDIODRIVER"] = "dummy"
+
+
 class MusicPlayer(QObject):
     def __init__(self):
         super().__init__()
@@ -40,6 +44,167 @@ class MusicPlayer(QObject):
     def set_volume(self, volume):
         self.volume = volume / 100.0
         pygame.mixer.music.set_volume(self.volume)
+
+class ConnectionDialog(QDialog):
+    def __init__(self):
+        super().__init__()
+        self.setup_ui()
+        self.setup_style()
+        self.username = ""
+        self.ip_address = ""
+        self.port = 0
+        
+    def setup_ui(self):
+        self.setWindowTitle("~ ChatTCP ~")
+        self.setFixedSize(400, 500)
+        self.setModal(True)
+        
+        layout = QVBoxLayout()
+        layout.setSpacing(15)
+        layout.setContentsMargins(20, 20, 20, 20)
+        
+        # Title
+        title = QLabel("❤️ Connect to Server! ❤️")
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("""
+            QLabel {
+                color: #FF1493;
+                font-size: 20px;
+                font-weight: bold;
+                font-family: 'Comic Sans MS', cursive;
+                padding: 10px;
+                border: none;
+            }
+        """)
+        
+        # Username input
+        username_label = QLabel("Username:")
+        username_label.setStyleSheet("color: #4A90E2; font-size: 14px; font-weight: bold; border: none;")
+        self.username_input = QLineEdit()
+        self.username_input.setPlaceholderText("Enter your username...")
+        
+        # IP Address input
+        ip_label = QLabel("IP Address:")
+        ip_label.setStyleSheet("color: #4A90E2; font-size: 14px; font-weight: bold; border: none;")
+        self.ip_input = QLineEdit()
+        self.ip_input.setText("127.0.0.1")  # Default value
+        self.ip_input.setPlaceholderText("Enter server IP address...")
+        
+        # Port input
+        port_label = QLabel("Port:")
+        port_label.setStyleSheet("color: #4A90E2; font-size: 14px; font-weight: bold; border: none;")
+        self.port_input = QLineEdit()
+        self.port_input.setText("9000")  # Default value
+        self.port_input.setPlaceholderText("Enter server port...")
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        
+        connect_btn = QPushButton("Connect")
+        connect_btn.clicked.connect(self.accept_connection)
+        connect_btn.setFixedHeight(40)
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        cancel_btn.setFixedHeight(40)
+        
+        button_layout.addWidget(cancel_btn)
+        button_layout.addWidget(connect_btn)
+        
+        # Add all widgets to layout
+        layout.addWidget(title)
+        layout.addSpacing(10)
+        layout.addWidget(username_label)
+        layout.addWidget(self.username_input)
+        layout.addWidget(ip_label)
+        layout.addWidget(self.ip_input)
+        layout.addWidget(port_label)
+        layout.addWidget(self.port_input)
+        layout.addSpacing(20)
+        layout.addLayout(button_layout)
+        
+        self.setLayout(layout)
+        
+        # Set focus to username input
+        self.username_input.setFocus()
+
+    def setup_style(self):
+        self.setStyleSheet("""
+            QDialog {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                                          stop:0 #FFE4E6, stop:0.5 #E6F3FF, stop:1 #F0E6FF);
+            }
+            
+            QLineEdit {
+                padding: 8px 12px;
+                font-size: 13px;
+                border: 2px solid #FF69B4;
+                border-radius: 15px;
+                background: white;
+                color: #2C2C2C;
+                height: 20px;
+            }
+            
+            QLineEdit:focus {
+                border: 2px solid #FF1493;
+                background: #FFF8F8;
+            }
+            
+            QPushButton {
+                padding: 10px 20px;
+                font-size: 14px;
+                font-weight: bold;
+                border: 2px solid #4A90E2;
+                border-radius: 15px;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                          stop:0 #E6F3FF, stop:1 #B6D7FF);
+                color: #2C2C2C;
+                min-width: 100px;
+            }
+            
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                          stop:0 #CCE6FF, stop:1 #99CCFF);
+                border: 2px solid #FF69B4;
+            }
+            
+            QPushButton:pressed {
+                background: #FFE4E6;
+            }
+        """)
+        
+    def accept_connection(self):
+        username = self.username_input.text().strip()
+        ip_address = self.ip_input.text().strip()
+        port_text = self.port_input.text().strip()
+        
+        # Validate inputs
+        if not username:
+            QMessageBox.warning(self, "Invalid Input", "Please enter a username!")
+            self.username_input.setFocus()
+            return
+            
+        if not ip_address:
+            QMessageBox.warning(self, "Invalid Input", "Please enter an IP address!")
+            self.ip_input.setFocus()
+            return
+            
+        try:
+            port = int(port_text)
+            if port < 1 or port > 65535:
+                raise ValueError("Port out of range")
+        except ValueError:
+            QMessageBox.warning(self, "Invalid Input", "Please enter a valid port number (1-65535)!")
+            self.port_input.setFocus()
+            return
+        
+        # Store the values
+        self.username = username
+        self.ip_address = ip_address
+        self.port = port
+        
+        # Accept the dialog
+        self.accept()
 
 class ChatMessage(QWidget):
     def __init__(self, username, message, timestamp, is_own=False):
@@ -140,6 +305,7 @@ class KessokuChatRoom(QMainWindow):
         self.port = port
         self.running = True
         self.message_received.connect(self.add_message)
+        self.history_messages = []
 
     def setup_ui(self):
         self.setWindowTitle("ChatTCP")
@@ -181,7 +347,7 @@ class KessokuChatRoom(QMainWindow):
         header_layout = QHBoxLayout(header)
         
         # Title
-        title = QLabel("Edbert Eddyson Gunawan")
+        title = QLabel("❤️ Edbert Eddyson Gunawan ❤️")
         title.setStyleSheet("""
             QLabel {
                 color: #FF1493;
@@ -203,6 +369,40 @@ class KessokuChatRoom(QMainWindow):
     def create_chat_area(self):
         chat_frame = QFrame()
         chat_layout = QVBoxLayout(chat_frame)
+        
+        # Chat controls (refresh button)
+        controls_layout = QHBoxLayout()
+        
+        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.clicked.connect(self.refresh_chat_history)
+        self.refresh_btn.setFixedWidth(150)
+        self.refresh_btn.setStyleSheet("""
+            QPushButton {
+                padding: 6px 12px;
+                font-size: 12px;
+                font-weight: bold;
+                border: 2px solid #32CD32;
+                border-radius: 12px;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                          stop:0 #E6FFE6, stop:1 #B6FFB6);
+                color: #2C2C2C;
+            }
+            
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                          stop:0 #CCFFCC, stop:1 #99FF99);
+                border: 2px solid #228B22;
+            }
+            
+            QPushButton:pressed {
+                background: #E6FFE6;
+            }
+        """)
+        
+        controls_layout.addWidget(self.refresh_btn)
+        controls_layout.addStretch()
+        
+        chat_layout.addLayout(controls_layout)
         
         # Chat display
         self.chat_scroll = QScrollArea()
@@ -383,6 +583,9 @@ class KessokuChatRoom(QMainWindow):
 
     def add_message(self, username, message, timestamp, is_own=False):
         message_widget = ChatMessage(username, message, timestamp, is_own)
+        self.history_messages.append((username, message, timestamp, is_own))
+        if len(self.history_messages) > 20:
+            self.history_messages.pop(0)
         
         # Remove stretch before adding new message
         if self.chat_layout.count() > 0:
@@ -487,8 +690,33 @@ class KessokuChatRoom(QMainWindow):
         self.listenThread = threading.Thread(target=self.listen_for_messages, daemon=True)
         self.listenThread.start()
 
+    def refresh_chat_history(self):
+        """Clear all current messages and reload only from history_messages"""
+        # Clear all current chat widgets
+        while self.chat_layout.count() > 0:
+            child = self.chat_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        
+        # Add stretch at the beginning
+        self.chat_layout.addStretch()
+        
+        # Reload messages from history_messages
+        for username, message, timestamp, is_own in self.history_messages:
+            message_widget = ChatMessage(username, message, timestamp, is_own)
+            
+            # Remove stretch before adding new message
+            if self.chat_layout.count() > 0:
+                stretch_item = self.chat_layout.takeAt(self.chat_layout.count() - 1)
+                
+            self.chat_layout.addWidget(message_widget)
+            self.chat_layout.addStretch()
+        
+        # Auto-scroll to bottom after refresh
+        QTimer.singleShot(100, self.scroll_to_bottom)
+        # print(f"[CLIENT] Chat refreshed - showing {len(self.history_messages)} messages from history")
+
 def main():
-    username = str(input("input username: "))
     app = QApplication(sys.argv)
 
     # Custom font if available
@@ -497,10 +725,26 @@ def main():
         font_family = QFontDatabase.applicationFontFamilies(font_id)[0]
         app.setFont(QFont(font_family, 10))
     
-    window = KessokuChatRoom("127.0.0.1", 9000)
-    window.show()
-    window.start_socket(username)
-
+    connection_dialog = ConnectionDialog()
+    if connection_dialog.exec_() == QDialog.Accepted:
+        # Get the connection details
+        username = connection_dialog.username
+        ip_address = connection_dialog.ip_address
+        port = connection_dialog.port
+        
+        print(f"[CLIENT] Connecting to {ip_address}:{port} as {username}")
+        
+        # Create and show main window
+        window = KessokuChatRoom(ip_address, port)
+        window.show()
+        window.start_socket(username)
+        
+        sys.exit(app.exec_())
+    else:
+        print("[CLIENT] Connection cancelled by user")
+        sys.exit(0)
+    
+    
     sys.exit(app.exec_())
 
 if __name__ == "__main__":
