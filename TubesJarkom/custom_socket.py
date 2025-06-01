@@ -409,6 +409,8 @@ class BetterUDPSocket:
         
         synack_segment = Segment(SYN | ACK, self.src_port, segment.src_port, 
                                server_seq, ack_num)
+        
+
         self.sock.sendto(synack_segment.pack(), addr)
         print(f"[SERVER] Sent SYN-ACK to {addr}")
         
