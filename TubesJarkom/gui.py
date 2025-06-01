@@ -13,6 +13,8 @@ from custom_socket import BetterUDPSocket
 
 import os
 os.environ["SDL_AUDIODRIVER"] = "dummy"
+# import os
+# os.environ["SDL_AUDIODRIVER"] = "dummy"
 
 
 class MusicPlayer(QObject):
